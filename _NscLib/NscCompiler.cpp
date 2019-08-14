@@ -589,7 +589,8 @@ NscCompiler::NscCompiler (
   m_ResLoadFile (NULL),
   m_ResUnloadFile (NULL),
   m_CacheResources (true),
-  m_ErrorOutput (NULL)
+  m_ErrorOutput (NULL),
+  m_LowerCase (false)
 {
 	m_CompilerState ->m_fSaveSymbolTable = SaveSymbolTable;
 }
@@ -738,6 +739,7 @@ NscCompiler::NscCompileScript (
 	m_StrictModeEnabled = (CompilerFlags & NscCompilerFlag_StrictModeEnabled) != 0;
     m_SuppressWarnings = (CompilerFlags & NscCompilerFlag_SuppressWarnings) != 0;
     m_CompilerState->m_SuppressWarnings = m_SuppressWarnings;
+	m_LowerCase = (CompilerFlags & NscCompilerFlag_LowerCase) != 0;
 
     Result = NscCompileScript (ScriptName,
 		(FileSize != 0) ? &FileContents [0] : NULL,
@@ -757,6 +759,7 @@ NscCompiler::NscCompileScript (
 	m_ShowPreprocessed = false;
     m_StrictModeEnabled = false;
     m_SuppressWarnings = false;
+	m_LowerCase = false;
 
 	return Result;
 }
@@ -852,7 +855,7 @@ NscCompiler::NscCompileScript (
 		m_StrictModeEnabled = (CompilerFlags & NscCompilerFlag_StrictModeEnabled) != 0;
         m_SuppressWarnings = (CompilerFlags & NscCompilerFlag_SuppressWarnings) != 0;
         m_CompilerState->m_SuppressWarnings = m_SuppressWarnings;
-
+        m_LowerCase = (CompilerFlags & NscCompilerFlag_LowerCase) != 0;
 		//
 		// Compile the script.
 		//
@@ -877,6 +880,7 @@ NscCompiler::NscCompileScript (
 		m_ShowPreprocessed = false;
         m_StrictModeEnabled = false;
         m_SuppressWarnings = false;
+		m_LowerCase = false;
 
 		//
 		// Only NscResult_Success actually returns output that is meaningful, so
@@ -1235,7 +1239,8 @@ NscCompiler::LoadResource (
 	NWN::ResRef32                 ResRef;
 
 	*pfAllocated = false;
-
+    std::string pszNameLower = pszName;
+    std::transform(pszNameLower.begin(), pszNameLower.end(), pszNameLower.begin(), ::tolower);
 	try
 	{
 		ResRef = m_ResourceManager .ResRef32FromStr (pszName);
@@ -1264,6 +1269,29 @@ NscCompiler::LoadResource (
 			*pfAllocated = false;
 			//g_Resources.insert(it->second.Location);
 			return it ->second .Contents;
+		}
+		else if(m_LowerCase)
+		{
+		    NWN::ResRef32 ResRefLower;
+		    try
+		    {
+				ResRefLower = m_ResourceManager .ResRef32FromStr (pszNameLower.c_str());
+			}
+			catch (std::exception)
+			{
+				return NULL;
+			}
+			
+			CacheKey .ResRef  = ResRefLower;
+			ResourceCache::const_iterator it = m_ResourceCache .find (CacheKey);
+
+			if (it != m_ResourceCache .end ())
+			{
+				*pulSize     = it ->second .Size;
+				*pfAllocated = false;
+				//g_Resources.insert(it->second.Location);
+				return it ->second .Contents;
+			}
 		}
 	}
 
@@ -1327,6 +1355,60 @@ NscCompiler::LoadResource (
 
 			return FileContents;
 		}
+		
+		if(m_LowerCase)
+		{
+			Str = *it;
+#ifdef _WINDOWS
+			if (Str.back() != '\\')
+				Str += "\\";
+#else
+			if (Str.back() != '/')
+				Str += "/";
+#endif
+			Str += pszNameLower; 
+			Str += ".";
+			Str += m_ResourceManager .ResTypeToExt (nResType);
+
+			FileContents = LoadFileFromDisk (Str .c_str (), pulSize);
+
+			if (FileContents != NULL)
+			{
+				LOG(DEBUG) << "Loaded File LC " << Str;
+
+				std::string res = *it + "/" + pszNameLower + "." + m_ResourceManager.ResTypeToExt(nResType);
+				*pfAllocated = true;
+
+				if ((m_ShowIncludes) && (m_ErrorOutput != NULL))
+				{
+					m_ErrorOutput->WriteText ("ShowIncludes: Handled resource LC %s\n", res.c_str());
+				}
+
+				if (m_GenerateMakeDeps)
+				{
+					LOG(DEBUG) << "Resource Path " << *it;
+					// ignore .bif files when adding dependencies
+					if (OsCompat::dirExists(std::string (*it).c_str())) {
+						g_Resources.insert(res);
+					}
+				}
+				//
+				// Try to cache the resource for next time around.
+				//
+
+				if (NscCacheResource (FileContents,
+					*pulSize,
+					*pfAllocated,
+					ResRef,
+					(NWN::ResType) nResType,
+					res))
+				{
+					*pfAllocated = false;
+				}
+
+				return FileContents;
+			}
+		}	
 	}
 
 	//
